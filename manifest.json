@@ -1,0 +1,11 @@
+{
+	"id": "more-ordered-lists",
+	"name": "More Ordered Lists",
+	"version": "0.0.1",
+	"minAppVersion": "0.15.0",
+	"description": "Adds support for alphabetic and roman ordered lists.",
+	"author": "Lucas Zischka",
+	"authorUrl": "https://github.com/lucaszischka",
+	"isDesktopOnly": false,
+	"fundingUrl" : "https://github.com/sponsors/lucaszischka"
+}

@@ -1,0 +1,36 @@
+/** READING MODE STYLES */
+
+/* For lists that use native list-style-type, we don't need custom CSS */
+/* This CSS only applies to lists with custom separators that need ::before pseudo-elements */
+
+/* Custom separators that can't be handled by list-style-type */
+ol.custom-separator li[data-separator=")"]::before {
+    content: attr(data-marker) ") ";
+    color: var(--list-marker-color);
+    position: absolute;
+    left: -2.2em;
+    width: 2em;
+    text-align: right;
+    pointer-events: none;
+}
+
+ol.custom-separator li[data-separator="()"]::before {
+    content: "(" attr(data-marker) ") ";
+    color: var(--list-marker-color);
+    position: absolute;
+    left: -2.2em;
+    width: 2em;
+    text-align: right;
+    pointer-events: none;
+}
+
+/* Reset positioning for custom separator list items */
+ol.custom-separator li {
+    position: relative;
+    list-style: none;
+}
+
+/* Hide native markers when using custom separators */
+ol.custom-separator {
+    list-style: none;
+}
