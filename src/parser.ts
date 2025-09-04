@@ -8,9 +8,10 @@ export class Parser {
 
     constructor(private settings: MoreOrderedListsSettings) { }
 
-    // MARK: Parse
+    // MARK: API
 
-    parseLines(lines: string[]): ParsedListLine[] | null {
+    // Reading mode post processor
+    parseLines(lines: string[]): [number, ParsedListLine][][] {
         // Create a mock document with the lines
         const mockDoc = {
             line: (lineNum: number) => ({
@@ -21,121 +22,143 @@ export class Parser {
             length: lines.length
         } as Text
 
-        // Use the existing parseList method
-        const parsedList = this.parseList(mockDoc, 1, lines.length)
-        
-        if (!parsedList || parsedList.length === 0)
-            return null
-
-        // Extract just the ParsedListLine objects
-        return parsedList.map(([, parsed]) => parsed)
+        // Use the common parseLists method
+        return this.parseLists(mockDoc, 1, lines.length)
     }
 
-    // Decorator
+    // Edit mode decorator
     parseViewport(
         view: EditorView
     ): [number, ParsedListLine][][] {
         const doc = view.state.doc
         const viewport = view.viewport
 
-        let start = doc.lineAt(viewport.from).number // may not be a list
+        const start = doc.lineAt(viewport.from).number
         const end = doc.lineAt(viewport.to).number
 
-        // Get the first visible list
-        let parsedList: [number, ParsedListLine][] = []
-        for (; !parsedList.length && start <= end; start++) {
-            parsedList = this.parseList(doc, start, end)
-        }
+        // Find potential list start to handle cases where viewport starts mid-list
+        const potentialStart = this.findPotentialListStart(doc, start)
 
-        // If we found a list, get the next ones
-        if (parsedList.length) {
-            const parsedLists: [number, ParsedListLine][][] = [parsedList]
-            // Get the next visible lists
-            let lastLineNumber = Math.max(...parsedList.map(([lineNumber]) => lineNumber)) + 1
-            for (; lastLineNumber <= end; lastLineNumber++) {
-                const nextParsedLines = this.parseList(doc, lastLineNumber, end)
-                if (nextParsedLines.length) {
-                    parsedLists.push(nextParsedLines)
-                    lastLineNumber = Math.max(...nextParsedLines.map(([lineNumber]) => lineNumber)) + 1
-                }
-            }
+        // Parse all lists from potential start to end
+        const allLists = this.parseLists(doc, potentialStart, end)
 
-            return parsedLists
-        }
-
-        return []
+        // Filter out lists that end before our actual viewport start
+        return allLists.filter(list => {
+            const lastLineNumber = Math.max(...list.map(([lineNumber]) => lineNumber))
+            return lastLineNumber >= start
+        })
     }
 
-    // KeyHandler, Decorator
-    parseList(
+    // Key Handlers
+    findListForLine(doc: Text, targetLine: number): [number, ParsedListLine][] {
+        const potentialStart = this.findPotentialListStart(doc, targetLine)
+        const allLists = this.parseLists(doc, potentialStart, doc.lines)
+        
+        // Find the list that contains our target line
+        for (const list of allLists) {
+            const found = list.find(([lineNumber]) => lineNumber === targetLine)
+            if (found)
+                return list // Return the ParsedListLine
+        }
+        
+        return [] // Target line is not part of any valid list
+    }
+
+    // MARK: Parsing
+
+    // Common method for finding multiple lists in a range
+    private parseLists(
+        doc: Text,
+        start: number,
+        end: number
+    ): [number, ParsedListLine][][] {
+        const parsedLists: [number, ParsedListLine][][] = []
+        let currentLine = start
+
+        while (currentLine <= end) {
+            const parsedList = this.parseList(doc, currentLine, end)
+            
+            if (parsedList.length > 0) {
+                parsedLists.push(parsedList)
+                // Move to the line after the last parsed line
+                currentLine = Math.max(...parsedList.map(([lineNumber]) => lineNumber)) + 1
+            } else {
+                // No list found at current line, move to next
+                currentLine++
+            }
+        }
+
+        return parsedLists
+    }
+
+    /**
+     * Parses a single list starting from the given line and moving forward.
+     * Uses incremental validation with context tracking to ensure proper nesting.
+     * 
+     * Note: This method does not perform backward scanning to find the list start.
+     * The caller is responsible for providing the correct starting line.
+     * Use `findPotentialListStart` if you need to find the start of a list.
+     */
+    private parseList(
         doc: Text,
         start: number,
         end: number
     ): [number, ParsedListLine][] {
-        // Find the first valid line of the current list
-        let listStart = start;
-        for (; listStart >= 1; listStart--) {
-            const lineText = doc.line(listStart).text
-            if (!this.parseLine(lineText, null)) {
-                // The start itself is not a valid list
-                if (listStart === start)
-                    return []
-                break
-            }
-        }
-        // The last line was valid, so it is our start
-        if (listStart !== start)
-            listStart++
-
-        // Go through the lines of this list and parse them
+        
+        const contextStack: ParsedListLine[] = []
         const parsedLines: [number, ParsedListLine][] = []
-        for (let lineNumber = listStart; lineNumber <= end; lineNumber++) {
+        
+        for (let lineNumber = start; lineNumber <= end; lineNumber++) {
             const lineText = doc.line(lineNumber).text
             const indentationLevel = this.getIndentationLevel(lineText)
-            // Get the context
-            const context = this.findContext(
-                indentationLevel,
-                parsedLines
-            )
-            const current = this.parseLine(
-                lineText,
-                context
-            )
+            
+            // Validate that the indentation increase is valid (only one level at a time)
+            if (contextStack.length < indentationLevel)
+                // Invalid indentation jump - break parsing
+                break
+            
+            // Pop contexts until we're at (or below) target level
+            while (contextStack.length - 1 > indentationLevel) {
+                contextStack.pop()
+            }
+            
+            // Get context from stack (previous line at same level)
+            const context = contextStack.length > indentationLevel 
+                ? contextStack[indentationLevel] 
+                : null
+            
+            const current = this.parseLine(lineText, context)
             if (!current)
                 break
 
-            // Get the parent
-            const parent = this.findParent(
-                indentationLevel,
-                parsedLines
-            )
+            // Get the parent from the stack (one level up)
+            const parent = indentationLevel > 0 && contextStack.length >= indentationLevel
+                ? contextStack[indentationLevel - 1]
+                : null
 
             // Only parse if we are in a list or at the top level
-            if (!context
-                && !parent
-                && current.getIndentationLevel() > 0)
+            if (!context && !parent && indentationLevel > 0)
                 break
 
-            // SPECIAL CASE: We only want to parser numbers under certain conditions
-            // If the seperator is parentheses, we always parse it, e.g. (1)
-            // If not, it must be part of our custom lists
-            // This is not the case, if the indentation level is zero
-            // This is not the case, if it has no context or parent
-            if (current.type === ListType.Numbered
-                && current.separator !== ListSeparator.Parentheses
-                && current.getIndentationLevel() === 0
-                && !context
-                && !parent)
+            // SPECIAL CASE: We only want to parse numbered and unordered lists
+            // if they are not handled by Obsidian
+            // This is the case, if they are at the top level (no parent)
+            if ((current.type === ListType.Unordered
+                || (current.type === ListType.Numbered && current.separator !== ListSeparator.Parentheses))
+                && (!parent || indentationLevel === 0)
+            )
                 break
+
+            if (contextStack.length === indentationLevel) {
+                // Add the new indentation level
+                contextStack.push(current)
+            } else {
+                // Update the context at this level
+                contextStack[indentationLevel] = current
+            }
 
             parsedLines.push([lineNumber, current])
         }
-
-        // SPECIAL CASE: The start line is not included in the parsed lines
-        if (parsedLines.length > 0 && parsedLines[parsedLines.length - 1][0] < start)
-            return []
-
-        //console.log(parsedLines)
 
         return parsedLines
     }
@@ -147,6 +170,14 @@ export class Parser {
         // Create regex patterns based on settings
         const markerPattern = this.buildMarkerPattern()
         const separatorPattern = this.buildSeparatorPattern()
+
+        // Unordered list regex match: INDENTATION + UNORDERED_MARKER + SPACE + CONTENT
+        const unorderedPattern = new RegExp(`^(\\s*)([*\\-+]) (.*)$`)
+        const unorderedMatch = unorderedPattern.exec(lineText)
+        if (unorderedMatch) {
+            const [, indentation, marker, content] = unorderedMatch
+            return this.createResult(indentation, marker, ListSeparator.Dot, content, context)
+        }
 
         // Standard regex match: INDENTATION + MARKER + SEPARATOR + SPACE + CONTENT
         const standardRegex = new RegExp(`^(\\s*)(${markerPattern})([${separatorPattern}]) (.*)$`)
@@ -167,6 +198,26 @@ export class Parser {
         }
         
         return null
+    }
+
+    private createResult(
+        indentation: string,
+        marker: string,
+        separator: ListSeparator,
+        content: string,
+        context: ParsedListLine | null
+    ): ParsedListLine | null {
+        const listType = this.determineListType(marker, context)
+        if (!listType)
+            return null
+
+        return new ParsedListLine(
+            listType,
+            indentation,
+            marker,
+            separator,
+            content
+        )
     }
 
     // MARK: Regex Patterns
@@ -209,57 +260,42 @@ export class Parser {
         return separators.join('')
     }
 
-    // MARK: Create ParsedListLine
-
-    private createResult(
-        indentation: string,
-        marker: string,
-        separator: ListSeparator,
-        content: string,
-        context: ParsedListLine | null
-    ): ParsedListLine | null {
-        const listType = this.determineListType(marker, context)
-        if (!listType)
-            return null
-
-        if (context) {
-            // Use context to correct marker
-            marker = this.correctMarker(listType, context)
-            // Also inherit separator from context
-            separator = context.separator
-        }
-
-        return new ParsedListLine(
-            listType,
-            indentation,
-            marker,
-            separator,
-            ' ' + content // Add space back
-        );
-    }
-
     // MARK: List Type
 
-    private determineListType(
-        marker: string,
-        context: ParsedListLine | null = null
-    ): ListType | null {
-        // Use context type as the primary hint when available
-        if (context) {
-            switch (context.type) {
-                case ListType.Alphabetical:
-                    // SPECIAL CASE: Transition to nested
-                    if (marker.length > 1 || context.getValue(this.settings.nestedAlphabeticalMode === 'repeated') === 26) {
-                        if (this.settings.nestedAlphabeticalMode !== 'disabled')
-                            return ListType.NestedAlphabetical
-                        return null
-                    }
-                    return ListType.Alphabetical
-                default:
-                    return context.type
+    private determineListType(marker: string, context: ParsedListLine | null): ListType | null {
+        const intrinsicType = this.determineIntrinsicListType(marker)
+
+        // If we have no context, we use the intrinsic type
+        if (!context)
+            return intrinsicType
+
+        // If they are the same type, it's a valid continuation
+        if (intrinsicType === context.type)
+            return intrinsicType
+
+        // If the intrinsic type is roman, we need context to determine the actual type
+        // This is because roman numerals are the default for ambiguous cases
+        if (intrinsicType === ListType.Roman) {
+            // They need to be the same length, otherwise it can not be reclassified
+            if (marker.length === context.marker.length) {
+                switch (context.type) {
+                    case ListType.Alphabetical:
+                    case ListType.NestedAlphabetical:
+                        return context.type
+                }
             }
         }
-        // Otherwise determine based on marker and settings
+
+        // Transitions from alphabetical to nested alphabetical are allowed
+        if (context.type === ListType.Alphabetical && intrinsicType === ListType.NestedAlphabetical)
+            return ListType.NestedAlphabetical
+
+        return null
+    }
+
+    private determineIntrinsicListType(marker: string): ListType | null {
+        if (marker === '*' || marker === '-' || marker === '+')
+            return ListType.Unordered
         if (!isNaN(parseInt(marker)))
             return ListType.Numbered
         if (this.isValidRomanNumeral(marker)
@@ -301,163 +337,50 @@ export class Parser {
         return validRomanPattern.test(roman)
     }
 
-    // MARK: Marker sequence
-    
-    private correctMarker(
-        type: ListType,
-        context: ParsedListLine
-    ): string {
-        const expectedValue = context.getValue(this.settings.nestedAlphabeticalMode === 'repeated') + 1
+    // MARK: List Start Detection
 
-        switch (type) {
-            case ListType.Roman: {
-                return context.applyCaseStyle(
-                    this.generateRomanMarker(expectedValue)
-                )
-            }
-            case ListType.Alphabetical:
-            case ListType.NestedAlphabetical: {
-                return context.applyCaseStyle(
-                    this.generateAlphabeticalMarker(expectedValue)
-                )
-            }
-            case ListType.Numbered: {
-                return expectedValue.toString()
-            }
-        }
-    }
-
-    private generateAlphabeticalMarker(value: number): string {
-        if (value < 1)
-            throw new Error(`Alphabetical value out of range: ${value}`)
+    /**
+     * Finds the potential start of a list that could contain the target line.
+     * 
+     * This method scans backward from the target line to find where a list
+     * could potentially begin. It only checks for syntactic patterns (whether
+     * lines look like list items), not semantic validity (whether they form
+     * a coherent list structure).
+     * 
+     * Used by key handlers and viewport parsing when starting mid-list.
+     */
+    private findPotentialListStart(doc: Text, targetLine: number): number {
+        // Start from the target line and scan backward
+        let currentLine = targetLine
         
-        // Setting determines generation mode for all nested alphabetical lists
-        if (this.settings.nestedAlphabeticalMode === 'repeated')
-            return this.generateRepeatedLettersMarker(value)
-        
-        // Default to bijective base-26
-        return this.generateStandardAlphabeticalMarker(value)
-    }
-    
-    private generateStandardAlphabeticalMarker(value: number): string {
-        if (value < 1)
-            throw new Error(`Alphabetical value out of range: ${value}`)
-        
-        let result = ''
-        let remaining = value
-
-        // Convert to bijective base-26 system where a=1, b=2, ..., z=26
-        while (remaining > 0) {
-            remaining-- // Adjust for 1-based indexing (bijective)
-            const charCode = (remaining % 26) + 1 // 1-26
-            const char = String.fromCharCode(96 + charCode)
-            result = char + result
-            remaining = Math.floor(remaining / 26)
-        }
-        
-        return result // Lowercase
-    }
-
-    // Generates markers for both single and nested alphabetical lists based on repeated letters setting
-    private generateRepeatedLettersMarker(value: number): string {
-        if (value < 1)
-            throw new Error(`Alphabetical value out of range: ${value}`)
-        
-        // Calculate which length group this value belongs to
-        let baseValue = 0
-        let length = 1
-        
-        // Find the appropriate length
-        for (let maxLength = 10; length <= maxLength; length++) {
-            const groupSize = 26 // Each length has 26 possibilities (a-z)
+        // Keep scanning backward while we find lines that look like list items
+        while (currentLine >= 1) {
+            const lineText = doc.line(currentLine).text
+            const parsedLine = this.parseLine(lineText, null)
             
-            if (value <= baseValue + groupSize)
-                break
-            
-            baseValue += groupSize
-            
-            if (length === maxLength)
-                throw new Error(`Value ${value} too large for repeated letters mode`)
-        }
-        
-        // Calculate which letter in this length group
-        const letterIndex = value - baseValue // 1-26
-        const char = String.fromCharCode(96 + letterIndex) // Convert to 'a'-'z'
-        
-        return char.repeat(length)
-    }
-
-    private generateRomanMarker(value: number): string {
-        if (value < 1)
-            throw new Error(`Roman value out of range: ${value}`)
-        
-        // Roman numeral mapping in descending order of value
-        // Includes subtractive notation (e.g., cm = 900, cd = 400)
-        const romanNumeralMap = new Map([
-            [1000, 'm'],
-            [900,  'cm'],
-            [500,  'd'],
-            [400,  'cd'],
-            [100,  'c'],
-            [90,   'xc'],
-            [50,   'l'],
-            [40,   'xl'],
-            [10,   'x'],
-            [9,    'ix'],
-            [5,    'v'],
-            [4,    'iv'],
-            [1,    'i']
-        ])
-        
-        let romanNumeral = ''
-        let remainingValue = value
-        
-        // Convert to Roman numerals by repeatedly subtracting the largest possible value
-        for (const [value, numeral] of romanNumeralMap) {
-            while (remainingValue >= value) {
-                romanNumeral += numeral
-                remainingValue -= value
+            if (parsedLine === null) {
+                // Found a non-list line
+                if (currentLine === targetLine)
+                    // The target line itself is not a list line
+                    return targetLine
+                
+                // The list starts after this non-list line
+                return currentLine + 1
             }
+            
+            // This line looks like a list item, continue scanning backward
+            currentLine--
         }
         
-        return romanNumeral // Lowercase
+        // Reached the beginning of the document, so start from line 1
+        return 1
     }
 
-    // MARK: Context and Parent
+    // MARK: Indentation
 
     private getIndentationLevel(lineText: string): number {
         const match = /^(\s*)/.exec(lineText)
         const indentation = match ? match[0] : ''
         return ParsedListLine.getIndentationLevel(indentation)
-    }
-
-    private findContext(
-        level: number,
-        parsedLines: [number, ParsedListLine][]
-    ): ParsedListLine | null {
-        // Scan backwards for context
-        for (let i = parsedLines.length - 1; i >= 0; i--) {
-            const [, lineData] = parsedLines[i]
-            if (lineData.getIndentationLevel() === level)
-                return lineData
-            if (lineData.getIndentationLevel() < level)
-                return null
-        }
-        return null
-    }
-
-    private findParent(
-        level: number,
-        parsedLines: [number, ParsedListLine][]
-    ): ParsedListLine | null {
-        // Scan backwards for parent
-        for (let i = parsedLines.length - 1; i >= 0; i--) {
-            const [, lineData] = parsedLines[i]
-            if (lineData.getIndentationLevel() + 1 === level)
-                return lineData
-            if (lineData.getIndentationLevel() < level - 1)
-                return null
-        }
-        return null
     }
 }

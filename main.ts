@@ -55,6 +55,8 @@ export default class MoreOrderedListsPlugin extends Plugin {
                     key: "Enter",
                     run: (view) => this.keyHandler.enterKey(view)
                 },
+				// TODO: LATER These won't work on mobile, as the keyboard typically has no Tab key
+				// Most likely the user will use the toolbar, but i don't know how to register events to it
                 {
                     key: "Tab",
                     run: (view) => this.keyHandler.tabKey(view, false)

@@ -5,6 +5,7 @@ import { RangeSetBuilder } from '@codemirror/state'
 import type { Parser } from "../parser"
 import { settingsUpdateEffect } from '../settings/types'
 import type { ParsedListLine } from "../types"
+import { ListType } from "../types"
 
 export class EditorDecorator {
     decorations: DecorationSet = Decoration.none
@@ -47,7 +48,8 @@ export class EditorDecorator {
     ): void { 
         // Positions
         const markerStart = lineFrom + result.indentation.length
-        const contentStart = markerStart + result.marker.length + result.separator.length + 1 // space after separator (assumed to be present)
+        const separatorLength = result.type === ListType.Unordered ? 0 : result.separator.length
+        const contentStart = markerStart + result.marker.length + separatorLength + 1 // space after marker/separator
         const contentEnd = lineFrom + result.getLineText().length
         // Indentation
         const indentLevel = result.getIndentationLevel()
@@ -89,21 +91,24 @@ export class EditorDecorator {
         }*/
 
         // 3. Apply outer formatting mark to exact marker range
+        const isUnordered = result.type === ListType.Unordered
+        const listFormattingClass = isUnordered ? 'cm-formatting-list-ul' : 'cm-formatting-list-ol'
         builder.add(
             markerStart,
             contentStart,
             Decoration.mark({
-                class: `cm-formatting cm-formatting-list cm-formatting-list-ol cm-list-${cssLevel}`,
+                class: `cm-formatting cm-formatting-list ${listFormattingClass} cm-list-${cssLevel}`,
                 inclusive: true
             })
         )
 
-        // 4. Apply inner list-number mark to exact marker range
+        // 4. Apply inner list marker to exact marker range
+        const markerClass = isUnordered ? 'list-bullet' : 'list-number'
         builder.add(
             markerStart,
             contentStart,
             Decoration.mark({
-                class: 'list-number',
+                class: markerClass,
                 inclusive: false
             })
         )

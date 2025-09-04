@@ -2,13 +2,23 @@ import type { MarkdownPostProcessorContext, App } from 'obsidian'
 
 import type { MoreOrderedListsSettings } from '../settings/types'
 import { Parser } from '../parser'
-import type { ParsedListLine } from 'src/types'
-import { ListType, ListSeparator } from 'src/types'
+import type { ParsedListLine } from '../types'
+import { ListType, ListSeparator } from '../types'
+
+interface ListContext {
+    element: HTMLOListElement
+    lastItem: HTMLLIElement
+}
+
+interface UnorderedListContext {
+    element: HTMLUListElement
+    lastItem: HTMLLIElement
+}
 
 export class ReadingModePostProcessor {
     private parser: Parser
 
-    constructor(private settings: MoreOrderedListsSettings, private app: App) {
+    constructor(settings: MoreOrderedListsSettings, private app: App) {
         this.parser = new Parser(settings)
     }
 
@@ -40,102 +50,249 @@ export class ReadingModePostProcessor {
                 hasSectionInfo = false
             }
             
-            // 3. Parse only these section lines
+            // 3. Parse section lines to get multiple lists with line numbers
             const parsedLines = this.parser.parseLines(sectionLines)
             if (!parsedLines || parsedLines.length === 0)
                 continue
                         
-            // 4. Generate HTML and replace paragraph
-            const listHTML = this.generateNestedHtml(parsedLines, hasSectionInfo)
+            // 4. Generate DOM elements with mixed content and replace paragraph
+            const mixedContent = this.createMixedContentStructure(parsedLines, sectionLines, hasSectionInfo)
+            if (!mixedContent) continue
+            
             const parentContainer = paragraph.parentNode
             if (parentContainer && parentContainer instanceof Element && parentContainer.classList.contains('el-p')) {
-                parentContainer.className = 'el-ol'
-                parentContainer.innerHTML = listHTML
+                // Replace the parent container with our mixed content
+                this.replaceElementWithMixedContent(parentContainer, mixedContent)
             } else {
                 // Fallback: just replace paragraph content
-                paragraph.innerHTML = listHTML
+                this.replaceElementWithMixedContent(paragraph, mixedContent)
             }
         }
     }
 
-    private generateNestedHtml(listLines: ParsedListLine[], hasSectionInfo: boolean): string {
-        let html = this.createListTag(listLines[0])
-        let currentIndentLevel = 0
+    private createMixedContentStructure(
+        parsedLines: [number, ParsedListLine][][], 
+        sectionLines: string[], 
+        hasSectionInfo: boolean
+    ): HTMLElement[] | null {
+        const result: HTMLElement[] = []
+        let currentLineIndex = 0
+
+        for (const listLine of parsedLines) {
+            if (listLine.length === 0) continue
+
+            // Get the start and end line numbers for this list (1-based from parser)
+            const listStartIndex = listLine[0][0] - 1
+            const listEndIndex = listLine[listLine.length - 1][0] - 1
+
+            // Add any non-list content before this list
+            if (listStartIndex > currentLineIndex) {
+                const nonListLines = sectionLines.slice(currentLineIndex, listStartIndex)
+                const paragraphElement = this.createParagraphElement(nonListLines)
+                result.push(paragraphElement)
+            }
+
+            // Extract just the ParsedListLine objects for creating the list
+            const listLines = listLine.map(([, parsed]) => parsed)
+            
+            // Add the list
+            const listElement = this.createNestedListStructure(listLines, hasSectionInfo)
+            if (listElement) {
+                const listContainer = this.createListContainer(listElement)
+                result.push(listContainer)
+            }
+
+            // Update current line index to after this list
+            currentLineIndex = listEndIndex + 1
+        }
+
+        // Add any remaining non-list content after the last list
+        if (currentLineIndex < sectionLines.length) {
+            const remainingLines = sectionLines.slice(currentLineIndex)
+            const paragraphElement = this.createParagraphElement(remainingLines)
+            result.push(paragraphElement)
+        }
+
+        return result.length > 0 ? result : null
+    }
+
+    private createParagraphElement(lines: string[]): HTMLElement {
+        const container = document.createElement('div')
+        container.className = 'el-p'
         
-        listLines.forEach((parsed, index) => {
-            const indentLevel = parsed.getIndentationLevel()
-            const nextItem = listLines[index + 1]
-            
-            // Handle indentation changes
-            html += this.handleIndentationChange(currentIndentLevel, indentLevel, parsed)
-            
-            // Add the list item
-            html += this.createListItem(parsed, index, nextItem, hasSectionInfo)
-            
-            currentIndentLevel = indentLevel
+        const paragraph = document.createElement('p')
+        paragraph.setAttribute('dir', 'auto')
+        
+        // Join lines with <br> elements
+        lines.forEach((line, index) => {
+            paragraph.appendChild(document.createTextNode(line))
+            if (index < lines.length - 1)
+                paragraph.appendChild(document.createElement('br'))
         })
         
-        // Close remaining nested lists and the final list item and root list
-        html += this.closeRemainingLists(currentIndentLevel)
+        container.appendChild(paragraph)
+        return container
+    }
+
+    private createListContainer(listElement: HTMLOListElement | HTMLUListElement): HTMLElement {
+        const container = document.createElement('div')
+        container.className = listElement instanceof HTMLUListElement ? 'el-ul' : 'el-ol'
+        container.appendChild(listElement)
+        return container
+    }
+
+    private replaceElementWithMixedContent(element: Element, mixedContent: HTMLElement[]): void {
+        // Clear existing content
+        while (element.firstChild)
+            element.removeChild(element.firstChild)
         
-        return html
-    }
-
-    private createListTag(parsed: ParsedListLine): string {
-        const styleType = this.getListStyleType(parsed)
-        const cssClass = this.isCustomSeparator(parsed) ? ' class="custom-separator"' : ''
-        return `<ol style="list-style-type: ${styleType}"${cssClass}>`
-    }
-
-    private handleIndentationChange(
-        currentLevel: number,
-        newLevel: number,
-        parsed: ParsedListLine
-    ): string {
-        if (newLevel > currentLevel) {
-            // Opening new nested level - don't close the current <li> yet
-            return this.createListTag(parsed)
-        } else if (newLevel < currentLevel) {
-            // Closing nested levels - need to close </li></ol> pairs
-            const levelsToClose = currentLevel - newLevel
-            return '</li>' + '</ol></li>'.repeat(levelsToClose)
-        }
-        return ''
-    }
-
-    private createListItem(
-        parsed: ParsedListLine,
-        index: number,
-        nextItem?: ParsedListLine,
-        hasSectionInfo = true
-    ): string {
-        const hasChildren = nextItem && nextItem.indentation.length > parsed.indentation.length
-        const dataAttributes = this.createDataAttributes(parsed)
-        const content = parsed.content.trim()
+        // Create fragment for batched DOM operations
+        const fragment = document.createDocumentFragment()
+        for (const contentElement of mixedContent)
+            fragment.appendChild(contentElement)
         
-        if (hasChildren) {
-            // Only add collapse icon when we have section info
-            const collapseIcon = hasSectionInfo ? this.createCollapseIcon() : ''
-            return `<li data-line="${index}" dir="auto" class=""${dataAttributes}>${collapseIcon}${content}`
+        // Add all content in one operation for better performance
+        element.appendChild(fragment)
+    }
+
+    private createNestedListStructure(listLines: ParsedListLine[], hasSectionInfo: boolean): HTMLOListElement | HTMLUListElement | null {
+        // Each ListContext represents one level of list nesting
+        // The index is therefore equal to the indentation level
+        // The lastItem is needed for appending new nested lists
+        const contextStack: (ListContext | UnorderedListContext)[] = []
+        
+        listLines.forEach((parsed, index) => {
+            const targetLevel = parsed.getIndentationLevel()
+            // Validate that the indentation increase is valid (only one level at a time)
+            if (contextStack.length < targetLevel)
+                throw new Error(`More Ordered Lists: Invalid indentation jump - trying to access level ${targetLevel} but only ${contextStack.length} levels exist. Parser should only increment by one level at a time.`)
+
+            // 1. Pop contexts until we're at (or below) target level
+            while (contextStack.length - 1 > targetLevel) {
+                contextStack.pop()
+            }
+            
+            // 2. Create new list if we need to increase indentation
+            if (contextStack.length === targetLevel) {
+                // Need to create a new list at this level
+                const newList = this.createListElement(parsed)
+
+                // Attach to parent's last item if we're nested
+                const parentContext = contextStack.last()
+                if (parentContext)
+                    parentContext.lastItem.appendChild(newList)
+                
+                // Create and add the actual list item
+                const nextItem = listLines[index + 1]
+                const listItem = this.createListItemElement(parsed, index, nextItem, hasSectionInfo)
+                newList.appendChild(listItem)
+                
+                if (parsed.type === ListType.Unordered) {
+                    contextStack.push({ element: newList as HTMLUListElement, lastItem: listItem })
+                } else {
+                    contextStack.push({ element: newList as HTMLOListElement, lastItem: listItem })
+                }
+            } else {
+                // Use existing list at this level - just add a new item
+                const targetContext = contextStack[targetLevel]
+                // This should never happen
+                if (!targetContext)
+                    throw new Error(`More Ordered Lists: Invalid state - no context found for indentation level ${targetLevel}. This suggests a parser error or unexpected indentation pattern.`)
+                
+                const nextItem = listLines[index + 1]
+                const listItem = this.createListItemElement(parsed, index, nextItem, hasSectionInfo)
+                targetContext.element.appendChild(listItem)
+                // Update the lastItem reference for this level
+                contextStack[targetLevel].lastItem = listItem
+            }
+        })
+        
+        // Return the root list element directly
+        const rootList = contextStack.first()
+        return rootList ? rootList.element : null
+    }
+
+    private createListElement(parsed: ParsedListLine): HTMLOListElement | HTMLUListElement {
+        if (parsed.type === ListType.Unordered) {
+            const ul = document.createElement('ul')
+            ul.classList.add('has-list-bullet')
+            return ul
         } else {
-            return `<li data-line="${index}" dir="auto"${dataAttributes}>${content}</li>`
+            const ol = document.createElement('ol')
+            
+            // Apply list-style-type
+            const styleType = this.getListStyleType(parsed)
+            ol.style.listStyleType = styleType
+            
+            // Apply custom separator class
+            if (this.isCustomSeparator(parsed))
+                ol.classList.add('custom-separator')
+            
+            return ol
         }
     }
 
-    private createDataAttributes(parsed: ParsedListLine): string {
-        return this.isCustomSeparator(parsed) 
-            ? ` data-marker="${parsed.marker}" data-separator="${parsed.separator}"` 
-            : ''
+    private createListItemElement(
+        parsed: ParsedListLine, 
+        index: number, 
+        nextItem?: ParsedListLine, 
+        hasSectionInfo = true
+    ): HTMLLIElement {
+        const li = document.createElement('li')
+        
+        // Set core attributes
+        li.setAttribute('data-line', index.toString())
+        li.setAttribute('dir', 'auto')
+        
+        // Add custom separator data attributes
+        if (this.isCustomSeparator(parsed)) {
+            li.setAttribute('data-marker', parsed.marker)
+            li.setAttribute('data-separator', parsed.separator)
+        }
+        
+        // Handle collapse icon for parent items
+        const hasChildren = nextItem && nextItem.indentation.length > parsed.indentation.length
+        if (hasChildren && hasSectionInfo) {
+            const collapseIcon = this.createCollapseIconElement()
+            li.appendChild(collapseIcon)
+        }
+        
+        // Handle unordered list bullet
+        if (parsed.type === ListType.Unordered) {
+            const bulletSpan = document.createElement('span')
+            bulletSpan.className = 'list-bullet'
+            bulletSpan.textContent = parsed.marker
+            li.appendChild(bulletSpan)
+        }
+        
+        // Add content (as text node)
+        li.appendChild(document.createTextNode(parsed.content))
+        
+        return li
     }
 
-    private createCollapseIcon(): string {
-        const iconAttrs = 'xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'
-        return `<span class="list-collapse-indicator collapse-indicator collapse-icon"><svg ${iconAttrs} class="svg-icon right-triangle"><path d="M3 8L12 17L21 8"></path></svg></span>`
-    }
-
-    private closeRemainingLists(currentIndentLevel: number): string {
-        // Close the final list item and then all remaining nested levels plus the root list
-        return '</li>' + '</ol></li>'.repeat(currentIndentLevel) + '</ol>'
+    private createCollapseIconElement(): HTMLElement {
+        const span = document.createElement('span')
+        span.className = 'list-collapse-indicator collapse-indicator collapse-icon'
+        
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+        svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+        svg.setAttribute('width', '24')
+        svg.setAttribute('height', '24')
+        svg.setAttribute('viewBox', '0 0 24 24')
+        svg.setAttribute('fill', 'none')
+        svg.setAttribute('stroke', 'currentColor')
+        svg.setAttribute('stroke-width', '2')
+        svg.setAttribute('stroke-linecap', 'round')
+        svg.setAttribute('stroke-linejoin', 'round')
+        svg.classList.add('svg-icon', 'right-triangle')
+        
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+        path.setAttribute('d', 'M3 8L12 17L21 8')
+        svg.appendChild(path)
+        
+        span.appendChild(svg)
+        return span
     }
 
     private isCustomSeparator(parsed: ParsedListLine): boolean {
@@ -155,6 +312,8 @@ export class ReadingModePostProcessor {
                 return parsed.getCaseStyle() === 'upper' ? 'upper-roman' : 'lower-roman'
             case ListType.Numbered:
                 return 'decimal'
+            case ListType.Unordered:
+                return 'none' // We use custom bullet styling
         }
     }
 
@@ -203,9 +362,8 @@ export class ReadingModePostProcessor {
 
         // Find the first line of the paragraph in the file
         const firstParagraphLine = paragraphLines[0]
-        if (!firstParagraphLine) {
+        if (!firstParagraphLine)
             return this.fallbackToBasicParsing(paragraph)
-        }
 
         // Search for the matching content in the file
         for (let i = 0; i < fileLines.length; i++) {

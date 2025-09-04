@@ -1,6 +1,6 @@
 import { Parser } from '../parser';
 import { MoreOrderedListsSettings } from '../settings/types';
-import { testValidTestCases, INVALID_PATTERNS } from './test-data';
+import { testValidTestCases, testUnorderedListCases, INVALID_PATTERNS } from './test-data';
 import { ListType, ListSeparator } from '../types';
 
 describe('Parser Validation Tests', () => {
@@ -60,13 +60,17 @@ describe('Parser Validation Tests', () => {
         describe('Nested Alphabetical Lists (Uppercase, Parentheses)', () => {
             testValidTestCases(() => parser, ListType.NestedAlphabetical, 'upper', ListSeparator.Parenthesis)
         })
+
+        describe('Unordered Lists (Nested)', () => {
+            testUnorderedListCases(() => parser)
+        })
     })
 
     describe('Invalid Pattern Parsing', () => {
         INVALID_PATTERNS.forEach(line => {
             it(`should reject: "${line}"`, () => {
                 const result = parser.parseLines([line])
-                expect(result).toBeNull()
+                expect(result).toHaveLength(0)
             })
         })
     })

@@ -1,10 +1,12 @@
 import type { Editor } from 'obsidian'
+import { MoreOrderedListsSettings } from './settings/types'
 
 export enum ListType {
     Alphabetical = 'alphabetical',
     Roman = 'roman',
     NestedAlphabetical = 'nestedAlphabetical',
-    Numbered = 'numbered'
+    Numbered = 'numbered',
+    Unordered = 'unordered'
 }
 
 export enum ListSeparator {
@@ -19,14 +21,16 @@ export class ParsedListLine {
         public indentation: string, // Before the marker
         public marker: string, // Without spacing and separator, e.g. "A", "i", "AA"
         public separator: ListSeparator,
-        public content: string // Contains the leading space(s)
+        public content: string
     ) {}
 
     getLineText(): string {
         if (this.separator === ListSeparator.Parentheses)
-            return this.indentation + '(' + this.marker + ')' + this.content
+            return this.indentation + '(' + this.marker + ')' + ' ' + this.content
+        else if (this.type === ListType.Unordered)
+            return this.indentation + this.marker + ' ' + this.content
         else
-            return this.indentation + this.marker + this.separator + this.content
+            return this.indentation + this.marker + this.separator + ' ' + this.content
     }
 
     // MARK: Indentation
@@ -124,6 +128,8 @@ export class ParsedListLine {
                 return this.calculateRomanValue()
             case ListType.Numbered:
                 return parseInt(this.marker)
+            case ListType.Unordered:
+                return 1 // Unordered lists don't have meaningful numeric values
             default:
                 throw new Error(`The list type '${this.type}' is not known.`)
         }
@@ -245,7 +251,7 @@ export class ParsedListLine {
         return value
     }
 
-    // MARK: Formatting
+    // MARK: Marker sequence
 
     asFirstMarker(enableJuraOrdering: boolean) {
         if (enableJuraOrdering) {
@@ -317,6 +323,156 @@ export class ParsedListLine {
                 this.marker = '1'
                 break
         }
+    }
+
+    correctNextMarker(context: ParsedListLine, settings: MoreOrderedListsSettings) {
+        const expectedValue = context.getValue(settings.nestedAlphabeticalMode === 'repeated') + 1
+
+        this.type = context.type 
+        this.separator = context.separator
+
+        switch (context.type) {
+            case ListType.Roman: {
+                this.marker = context.applyCaseStyle(
+                    this.generateRomanMarker(expectedValue)
+                )
+                break
+            }
+            case ListType.Alphabetical: {
+                // SPECIAL CASE: Transition to nested alphabetical
+                if (expectedValue > 26) {
+                    // Only continue list after z with nested if settings allow it
+                    if (settings.nestedAlphabeticalMode === 'disabled') {
+                        throw new Error(`Cannot continue list after z as nested alphabetical mode is disabled`)
+                    } else {
+                        this.type = ListType.NestedAlphabetical
+                    }
+                }
+                // fallthrough
+            }
+            case ListType.NestedAlphabetical: {
+                this.marker = context.applyCaseStyle(
+                    this.generateAlphabeticalMarker(expectedValue, settings)
+                )
+                break
+            }
+            case ListType.Numbered: {
+                this.marker = expectedValue.toString()
+                break
+            }
+            case ListType.Unordered: {
+                this.marker = context.marker // Keep the same marker (*, -, or +)
+                break
+            }
+        }
+    }
+
+    private generateAlphabeticalMarker(value: number, settings: MoreOrderedListsSettings): string {
+        if (value < 1)
+            throw new Error(`Alphabetical value out of range: ${value}`)
+        
+        // Setting determines generation mode for all nested alphabetical lists
+        if (settings.nestedAlphabeticalMode === 'repeated')
+            return this.generateRepeatedLettersMarker(value)
+        
+        // Default to bijective base-26
+        return this.generateStandardAlphabeticalMarker(value)
+    }
+    
+    private generateStandardAlphabeticalMarker(value: number): string {
+        if (value < 1)
+            throw new Error(`Alphabetical value out of range: ${value}`)
+        
+        let result = ''
+        let remaining = value
+
+        // Convert to bijective base-26 system where a=1, b=2, ..., z=26
+        while (remaining > 0) {
+            remaining-- // Adjust for 1-based indexing (bijective)
+            const charCode = (remaining % 26) + 1 // 1-26
+            const char = String.fromCharCode(96 + charCode)
+            result = char + result
+            remaining = Math.floor(remaining / 26)
+        }
+        
+        return result // Lowercase
+    }
+
+    // Generates markers for both single and nested alphabetical lists based on repeated letters setting
+    private generateRepeatedLettersMarker(value: number): string {
+        if (value < 1)
+            throw new Error(`Alphabetical value out of range: ${value}`)
+        
+        // Calculate which length group this value belongs to
+        let baseValue = 0
+        let length = 1
+        
+        // Find the appropriate length
+        for (let maxLength = 10; length <= maxLength; length++) {
+            const groupSize = 26 // Each length has 26 possibilities (a-z)
+            
+            if (value <= baseValue + groupSize)
+                break
+            
+            baseValue += groupSize
+            
+            if (length === maxLength)
+                throw new Error(`Value ${value} too large for repeated letters mode`)
+        }
+        
+        // Calculate which letter in this length group
+        const letterIndex = value - baseValue // 1-26
+        const char = String.fromCharCode(96 + letterIndex) // Convert to 'a'-'z'
+        
+        return char.repeat(length)
+    }
+
+    private generateRomanMarker(value: number): string {
+        if (value < 1)
+            throw new Error(`Roman value out of range: ${value}`)
+        
+        // Roman numeral mapping in descending order of value
+        // Includes subtractive notation (e.g., cm = 900, cd = 400)
+        const romanNumeralMap = new Map([
+            [1000, 'm'],
+            [900,  'cm'],
+            [500,  'd'],
+            [400,  'cd'],
+            [100,  'c'],
+            [90,   'xc'],
+            [50,   'l'],
+            [40,   'xl'],
+            [10,   'x'],
+            [9,    'ix'],
+            [5,    'v'],
+            [4,    'iv'],
+            [1,    'i']
+        ])
+        
+        let romanNumeral = ''
+        let remainingValue = value
+        
+        // Convert to Roman numerals by repeatedly subtracting the largest possible value
+        for (const [value, numeral] of romanNumeralMap) {
+            while (remainingValue >= value) {
+                romanNumeral += numeral
+                remainingValue -= value
+            }
+        }
+        
+        return romanNumeral // Lowercase
+    }
+
+    // MARK: Helper
+
+    clone(): ParsedListLine {
+        return new ParsedListLine(
+            this.type,
+            this.indentation,
+            this.marker,
+            this.separator,
+            this.content
+        );
     }
 }
 

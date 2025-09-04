@@ -42,16 +42,19 @@ The plugin extends Obsidian's list functionality using CodeMirror 6 extensions:
 
 ### Core Components
 
-#### 1. Parser (`src/editor/parser.ts`)
-- **List Detection**: Identifies and validates list markers (A., I., AA., etc.)
-- **Context Analysis**: Maintains list context across indentation levels
+#### 1. Parser (`src/parser.ts`)
+- **List Detection**: Identifies and validates list markers (A., I., AA., *, -, +, etc.)
+- **Context Analysis**: Maintains list context across indentation levels with stack-based tracking
 - **Roman Validation**: Proper Roman numeral validation (I-MMMCMXCIX)
 - **Value Calculation**: Converts markers to numerical values for sequencing
+- **Multi-list Support**: Handles multiple separate lists within a single document section
+- **Robust Validation**: Prevents invalid indentation jumps and circular dependencies
 
 #### 2. KeyHandler (`src/editor/key-handler.ts`)  
 - **Enter Key**: Auto-continues lists with next sequential marker
 - **Tab/Shift+Tab**: Manages indentation and marker updates
 - **List Termination**: Handles empty list items and list breaking
+- **Reordering Logic**: Efficiently updates subsequent list items after changes
 
 #### 3. EditorDecorator (`src/editor/editor-decorator.ts`)
 - **Visual Rendering**: Applies CodeMirror decorations for list styling
@@ -64,11 +67,12 @@ The plugin extends Obsidian's list functionality using CodeMirror 6 extensions:
 - **Live Updates**: Propagates settings changes to active editors
 
 #### 5. Reading Mode Post-Processor (`src/reading/post-processor.ts`)
-- **HTML Generation**: Converts custom list formats to proper HTML `<ol>` elements in reading mode
+- **HTML Generation**: Converts custom list formats to proper HTML `<ol>` and `<ul>` elements in reading mode
 - **Section-based Processing**: Processes only the lines belonging to each specific section to avoid duplication
 - **Nested List Support**: Handles complex nested structures with proper indentation
 - **Custom Separator Handling**: Manages non-dot separators (parentheses, etc.) with custom styling
 - **Collapse Indicators**: Adds collapsible UI elements for nested lists
+- **Mixed Content**: Handles documents with both list and non-list content seamlessly
 
 #### 6. Styling (`styles.css`)
 - **Custom Separator Styling**: Provides CSS for lists with non-dot separators
@@ -95,15 +99,22 @@ The plugin extends Obsidian's list functionality using CodeMirror 6 extensions:
 - Supports unlimited nesting depth
 
 #### Number Lists (1., 2., 3.)
-- Only processed when not hanled natively by Obisian
+- Only processed when not handled natively by Obsidian
 - Process when in parentheses format (1)
 - Process when part of mixed list context
 
-### Ambiguity
+#### Unordered Lists (*, -, +)
+- Only processed when nested under ordered lists
+- Top-level unordered lists are handled by Obsidian natively
+- Supports all three standard bullet markers (*, -, +)
+- Maintains marker consistency within the same level
 
-There are many ambigous markers (`i.` `ii.`, `c.`).
-If we have context (marker with the same indentation level above), it should be used as the primary type hint for the marker.
-Otherwise it should prefer valid roman markers.
+### Ambiguity Resolution
+
+There are many ambiguous markers (`i.` `ii.`, `c.`) that could be interpreted as either alphabetical or Roman numerals.
+The parser uses context-based resolution:
+- If we have context (marker with the same indentation level above), it should be used as the primary type hint
+- Without context, the parser prefers valid Roman markers over alphabetical ones
 
 ### Event Flow
 

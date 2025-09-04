@@ -4,8 +4,7 @@ import { Line } from '@codemirror/state';
 
 import type { MoreOrderedListsSettings } from 'src/settings/types'
 import type { Parser } from '../parser'
-import { ListType } from '../types'
-import type { ParsedListLine } from '../types'
+import { ListType, ParsedListLine } from '../types'
 
 export class KeyHandler {
     constructor(
@@ -19,43 +18,62 @@ export class KeyHandler {
         view: EditorView,
         shift: boolean
     ): boolean {
-        const parsed = this.getCurrentParsedLine(view)
-        if (!parsed)
+        const selection = view.state.selection
+        const doc = view.state.doc
+        
+        // Only handle single cursor and no selection
+        if (!selection.main.empty || selection.ranges.length > 1)
             return false
 
-        const { currentLine, current } = parsed
+        // Get the parsed current line
+        const cursor = selection.main.head
+        const currentLine = doc.lineAt(cursor)
+        const parsedList = this.parser.findListForLine(doc, currentLine.number)
+        const current = parsedList.find(([lineNumber]) => lineNumber === currentLine.number)?.[1]
+        if (!current)
+            return false
 
-        // Calculate new indentation
-        if (shift) {
-            // Decrease by one level
-            try {
+        try {
+            // Calculate new indentation
+            if (shift) {
+                // Decrease by one level
                 current.decreaseIndentationLevel()
-            } catch {
-                return false
+                this.updateMarkerFromContext(parsedList, currentLine.number, current)
+                
+                // Fix following line if needed (after current is updated)
+                this.fixFollowingLineAfterIndentDecrease(parsedList, currentLine.number, current)
+            } else {
+                // Increase by one level
+                current.increaseIndentationLevel() // Doesn't throw
+                this.updateMarkerFromContext(parsedList, currentLine.number, current)
             }
-        } else {
-            // Increase by one level
-            current.increaseIndentationLevel() 
+        } catch {
+            return false
         }
+
+        // Update the current line and reorder subsequent lines
+        this.updateLineAndReorder(view, currentLine, current, parsedList)
         
-        // Update marker - this might be wrong but reorderer will fix it
-        // If we don't, we would have ListType inference issues
-        current.asFirstMarker(this.settings.enableJuraOrdering)
-
-        this.updateLineAndReorder(view, currentLine, current.getLineText())
-
         return true
     }
 
     // MARK: Enter
 
     enterKey(view: EditorView): boolean {
-        const parsed = this.getCurrentParsedLine(view)
-        if (!parsed)
+        const selection = view.state.selection
+        const doc = view.state.doc
+        
+        // Only handle single cursor and no selection
+        if (!selection.main.empty || selection.ranges.length > 1)
             return false
 
-        const { currentLine, current } = parsed
-        const cursor = view.state.selection.main.head
+        // Get the parsed current line
+        const cursor = selection.main.head
+        const currentLine = doc.lineAt(cursor)
+        const parsedList = this.parser.findListForLine(doc, currentLine.number)
+        const current = parsedList.find(([lineNumber]) => lineNumber === currentLine.number)?.[1]
+        if (!current)
+            return false
 
         // SPECIAL CASE: Only continue list after z if nested is enabled
         if (current.type === ListType.Alphabetical
@@ -63,136 +81,326 @@ export class KeyHandler {
             && this.settings.nestedAlphabeticalMode === 'disabled')
             return false
 
-
-        const hasContent = current.content.trim().length > 0
-        current.content = ' ' // Remove the content
-        
         // SPECIAL CASE: Only continue list when enter would not break the list
-        if (cursor < currentLine.from + current.getLineText().length)
+        const prefixLength = current.getLineText().length - current.content.length
+        if (cursor < currentLine.from + prefixLength)
             return false
 
-        if (hasContent) {
-            // Create the next line
-            const nextLineText = '\n' + current.getLineText()
-
-            // Update line and reorder:
-            // 1. Insert the new line (Update)
-            const transaction = view.state.update({
-                changes: {
-                    from: cursor,
-                    insert: nextLineText
-                },
-                selection: {
-                    anchor: cursor + nextLineText.length
-                }
-            })
-            view.dispatch(transaction)
-            // The document reference (doc) is outdated after the transaction, use view
-            
-            // 2. Reorder
-            const nextLine = view.state.doc.lineAt(cursor + nextLineText.length)
-            this.reorder(view, nextLine.number)
-        } else {
-            // When no content decrease indentation or break the list
-            let updatedLineText: string
+        if (current.content.trim().length > 0) {
+            // Create next line with corrected marker
             try {
-                // Keep the line with indentation reduced by one level
+                const newLine = current.clone()
+                newLine.correctNextMarker(current, this.settings)
+                newLine.content = '' // Clear content for current line
+            
+                // Insert new line and reorder subsequent lines
+                this.insertLineAndReorder(view, currentLine, newLine, parsedList)
+            } catch (error) {
+                // Can't continue sequence (e.g., after 'z' with nested disabled)
+                return false
+            }
+        } else {
+            // Handle empty line case (decrease indentation or break list)
+            // Decrease indentation level and update line
+            try {
                 current.decreaseIndentationLevel()
-                // Update marker - this might be wrong but reorderer will fix it
-                // If we don't, we would have ListType inference issues
-                current.asFirstMarker(this.settings.enableJuraOrdering)
-                updatedLineText = current.getLineText()
+                this.updateMarkerFromContext(parsedList, currentLine.number, current)
+                
+                // Fix following line if needed (after current is updated)
+                this.fixFollowingLineAfterIndentDecrease(parsedList, currentLine.number, current)
+                
+                current.content = '' // Remove the content
             } catch {
-                // If no indentation is left, break the list by removing the marker
-                updatedLineText = ''
+                // Can't decrease further, break list by clearing the line (content already cleared above)
+                const changes: ChangeSpec[] = [{
+                    from: currentLine.from,
+                    to: currentLine.to,
+                    insert: ''
+                }]
+                this.applyChanges(view, changes, currentLine)
+                return true
             }
 
-            this.updateLineAndReorder(view, currentLine, updatedLineText)
+            // Update the current line and reorder subsequent lines
+            this.updateLineAndReorder(view, currentLine, current, parsedList)
         }
 
         return true
     }
 
-    // MARK: Helpers
+    // MARK: Context and Parent Extraction
 
-    private getCurrentParsedLine(
-        view: EditorView
-    ): { currentLine: Line, current: ParsedListLine } | null {
-        const selection = view.state.selection
-        const doc = view.state.doc
+    /**
+     * Finds the context (previous item at same indentation level) for a line in a parsed list.
+     * Used to determine the next marker in a sequence (e.g., if previous was 'b', next should be 'c').
+     */
+    private findContextInList(
+        parsedList: [number, ParsedListLine][],
+        targetLineNumber: number,
+        targetIndentationLevel: number
+    ): ParsedListLine | null {
+        // Look backwards through the list for the most recent item at the same indentation level
+        for (let i = parsedList.length - 1; i >= 0; i--) {
+            const [lineNumber, parsedLine] = parsedList[i]
+            
+            // Skip the target line itself and any lines after it
+            if (lineNumber >= targetLineNumber)
+                continue
+
+            const currentIndentationLevel = parsedLine.getIndentationLevel()
+
+            // Check if this line is at the same indentation level
+            if (currentIndentationLevel === targetIndentationLevel)
+                return parsedLine
+            // A line with lower indentation breaks context
+            if (currentIndentationLevel < targetIndentationLevel)
+                return null
+        }
         
-        // Only handle single cursor and no selection
-        if (!selection.main.empty || selection.ranges.length > 1)
-            return null
-
-        // Get the parsed current line
-        const cursor = selection.main.head
-        const currentLine = doc.lineAt(cursor)
-        const parsedList = this.parser.parseList(doc, currentLine.number, doc.lines)
-        const current = parsedList.find(([lineNumber]) => lineNumber === currentLine.number)
-        if (!current)
-            return null
-
-        return { currentLine, current: current[1] }
+        return null // No context found at this level
     }
 
+    /**
+     * Finds the parent (item at one level less indentation) for a line in a parsed list.
+     * Used to determine the list type and separator when starting a new nested level.
+     */
+    private findParentInList(
+        parsedList: [number, ParsedListLine][],
+        targetLineNumber: number,
+        targetIndentationLevel: number
+    ): ParsedListLine | null {
+        const parentIndentationLevel = targetIndentationLevel - 1
+        
+        // Can't have a parent if we're already at the top level
+        if (parentIndentationLevel < 0)
+            return null
+        
+        // Look backwards through the list for the most recent item at the parent level
+        for (let i = parsedList.length - 1; i >= 0; i--) {
+            const [lineNumber, parsedLine] = parsedList[i]
+            
+            // Skip the target line itself and any lines after it
+            if (lineNumber >= targetLineNumber)
+                continue
+            
+            // Check if this line is at the parent indentation level
+            if (parsedLine.getIndentationLevel() === parentIndentationLevel)
+                return parsedLine
+        }
+        
+        return null // No parent found
+    }
+
+    /**
+     * Fixes the following line after we decrease indentation.
+     * If the next line has the same indentation as our original level, it should become a first marker.
+     */
+    private fixFollowingLineAfterIndentDecrease(
+        parsedList: [number, ParsedListLine][],
+        modifiedLineNumber: number,
+        parentLine: ParsedListLine
+    ): void {
+        // Find the next line in the parsed list
+        const nextLineEntry = parsedList.find(([lineNumber]) => lineNumber === modifiedLineNumber + 1)
+        if (!nextLineEntry) return
+        
+        const [, nextLine] = nextLineEntry
+        const nextLineLevel = nextLine.getIndentationLevel()
+        
+        // If the next line has the same indentation as our original level had,
+        // it should become a first marker since we broke the context
+        if (nextLineLevel === parentLine.getIndentationLevel() + 1) {
+            // Inherit separator from the parent (our modified line)
+            nextLine.separator = parentLine.separator
+            nextLine.asFirstMarker(this.settings.enableJuraOrdering)
+        }
+    }
+
+    private updateMarkerFromContext(
+        parsedList: [number, ParsedListLine][],
+        lineNumber: number,
+        current: ParsedListLine
+    ) {
+        // Find context and parent for the current indentation level
+        const targetIndentationLevel = current.getIndentationLevel()
+        const context = this.findContextInList(parsedList, lineNumber, targetIndentationLevel)
+        const parent = this.findParentInList(parsedList, lineNumber, targetIndentationLevel)
+
+        // Update the marker based on context or parent
+        if (context) {
+            // Continue existing sequence at this level
+            current.correctNextMarker(context, this.settings)
+        } else if (parent) {
+            // Start new nested level - use first marker
+            current.separator = parent.separator // Inherit separator from parent
+            current.asFirstMarker(this.settings.enableJuraOrdering) // Overwrites separator if needed
+        } else {
+            // No context or parent found
+            throw new Error('No context or parent found to determine marker')
+        }
+    }
+
+    // MARK: Update and Reordering
+
+    // TODO: LATER PERFORMANCE We can optimize this
+    // TAB: Only update items at the new and previous indentation levels (respecting context breaks)
+    // ENTER: Only update items at the current indentation level (respecting context breaks)
+    
+    /**
+     * Updates the current line and reorders subsequent lines.
+     * Used for Tab key operations where we modify an existing line.
+     */
     private updateLineAndReorder(
         view: EditorView,
-        line: Line,
-        text: string
+        currentLine: Line,
+        updatedCurrentLine: ParsedListLine,
+        parsedList: [number, ParsedListLine][]
     ): void {
-        const cursor = view.state.selection.main.head
-        const transaction = view.state.update({
-            changes: {
-                from: line.from,
-                to: line.to,
-                insert: text
-            },
-            selection: {
-                anchor: cursor + text.length - (line.to - line.from)
-            }
+        const changes: ChangeSpec[] = []
+        
+        // Add the current line update
+        changes.push({
+            from: currentLine.from,
+            to: currentLine.to,
+            insert: updatedCurrentLine.getLineText()
         })
-        view.dispatch(transaction)
-        this.reorder(view, line.number)
+
+        // Reorder subsequent lines
+        this.collectReorderChanges(
+            view,
+            changes,
+            parsedList,
+            currentLine.number,
+            updatedCurrentLine
+        )
+
+        // Apply all changes and preserve cursor
+        this.applyChanges(view, changes, currentLine)
     }
 
-    // TODO: LATER PERFORMANCE: Reuse the parsedList until currentLineNumber-1
-    private reorder(
+    /**
+     * Inserts a new line after the current line and reorders subsequent lines.
+     * Used for Enter key operations where we create a new line.
+     */
+    private insertLineAndReorder(
         view: EditorView,
-        fromLineNumber: number
-    ) {
-        const doc = view.state.doc
-        const parsedList = this.parser.parseList(doc, fromLineNumber, doc.lines)
+        currentLine: Line,
+        newLine: ParsedListLine,
+        parsedList: [number, ParsedListLine][]
+    ): void {
         const changes: ChangeSpec[] = []
-        for (const [key, result] of parsedList) {
-            // Only update lines starting at fromLineNumber
-            if (key < fromLineNumber)
-                continue
+        
+        // Split at cursor position and insert new line with next marker
+        const cursor = view.state.selection.main.head
+        changes.push({
+            from: cursor,
+            to: cursor,
+            insert: '\n' + newLine.getLineText()
+        })
 
-            const currentLine = doc.line(key)
-            const newText = result.getLineText()
+        // Reorder subsequent lines (they will be shifted by +1 due to insertion)
+        this.collectReorderChanges(
+            view,
+            changes,
+            parsedList,
+            currentLine.number,
+            newLine
+        )
 
-            // Don't update if unchanged
-            if (currentLine.text === newText)
-                continue
+        // Apply all changes and position cursor after the marker on new line
+        this.applyChanges(view, changes, currentLine)
+    }
 
-            changes.push({
-                from: currentLine.from,
-                to: currentLine.to,
-                insert: newText
-            })
+    /**
+     * Collects reordering changes for lines after a modification point.
+     */
+    private collectReorderChanges(
+        view: EditorView,
+        changes: ChangeSpec[],
+        parsedList: [number, ParsedListLine][],
+        modifiedLineNumber: number,
+        modifiedLine: ParsedListLine
+    ): void {
+        const contextStack: ParsedListLine[] = []
+
+        // Process all lines in the parsed list
+        for (const [originalLineNumber, parsedLine] of parsedList) {
+            let lineToProcess = parsedLine
+            
+            // SPECIAL CASE: if this is the modified line, use updated data
+            if (originalLineNumber === modifiedLineNumber)
+                lineToProcess = modifiedLine
+            
+            const indentationLevel = lineToProcess.getIndentationLevel()
+            
+            // Pop contexts until we're at (or below) target level
+            while (contextStack.length - 1 > indentationLevel) {
+                contextStack.pop()
+            }
+            
+            // For lines after the modified line, correct the marker if needed
+            if (originalLineNumber > modifiedLineNumber) {
+                const context = contextStack[indentationLevel]
+                
+                if (context) {
+                    // Continue sequence from context
+                    try {
+                        lineToProcess.correctNextMarker(context, this.settings)
+                    } catch {
+                        // Ignore?
+                    }
+                }
+
+                // Check if this line needs updating
+                if (originalLineNumber <= view.state.doc.lines) {
+                    // For insertions, we should check what's currently at the ORIGINAL position
+                    // because that's what will be moved to the new position
+                    const currentLine = view.state.doc.line(originalLineNumber)
+                    const correctedText = lineToProcess.getLineText()
+
+                    // We should update if the corrected text differs from what's currently at the original position
+                    if (currentLine.text !== correctedText) {
+                        changes.push({
+                            from: currentLine.from,
+                            to: currentLine.to,
+                            insert: correctedText
+                        })
+                    }
+                }
+            }
+            
+            // Update context stack with current line
+            if (contextStack.length === indentationLevel) {
+                contextStack.push(lineToProcess)
+            } else {
+                contextStack[indentationLevel] = lineToProcess
+            }
         }
-        if (changes.length > 0) {
-            // Preserve the cursor position after the transaction
-            const fromLine = view.state.doc.line(fromLineNumber)
-            const cursor = view.state.selection.main.head
-            const distanceToEnd = fromLine.to - cursor
-            const transaction = view.state.update({ changes })
-            const mappedLineTo = transaction.changes.mapPos(fromLine.to, 1)
+    }
 
-            const anchor = mappedLineTo - distanceToEnd
+    /**
+     * Applies changes and preserves cursor position for line updates.
+     */
+    private applyChanges(
+        view: EditorView,
+        changes: ChangeSpec[],
+        currentLine: Line
+    ): void {
+        if (changes.length === 0) return
 
-            view.dispatch(view.state.update({ changes, selection: { anchor } }))
-        }
+        // Preserve the cursor position after the transaction by maintaining
+        // its relative distance from the end of the current line
+        const cursor = view.state.selection.main.head
+        const distanceToEnd = currentLine.to - cursor
+        
+        // Map the original line end position to its new location after changes
+        // The '1' parameter means "prefer the position after insertions" aka end of the line
+        const transaction = view.state.update({ changes })
+        const mappedLineTo = transaction.changes.mapPos(currentLine.to, 1)
+        
+        // Restore cursor to the same relative position from the (new) line end
+        const anchor = mappedLineTo - distanceToEnd
+
+        view.dispatch(view.state.update({ changes, selection: { anchor } }))
     }
 }

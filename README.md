@@ -1,39 +1,40 @@
-# More Ordered Lists
+# 📋 More Ordered Lists
 
 An Obsidian plugin that extends ordered list support beyond standard numbers (1., 2., 3.) to include alphabetical, Roman, and nested alphabetical lists with intelligent auto-continuation and formatting.
 
-## Features
+## 🚀 Features
 
-### Supported List Types
+### ✨ Supported List Types
 - **Alphabetical**: A., B., C. ... Z. (uppercase) and a., b., c. ... z. (lowercase)
 - **Roman Numerals**: I., II., III., IV., V. (uppercase) and i., ii., iii., iv., v. (lowercase)
 - **Nested Alphabetical**: Two modes available:
   - **Bijective (AA, AB, AC)**: Mathematical base-26 progression - AA., AB., AC. ... AZ., BA., BB. ... ZZ., AAA.
   - **Repeated (AA, BB, CC)**: Letter repetition - AA., BB., CC. ... ZZ., AAA., BBB.
+- **Unordered Lists**: *, -, + when nested under ordered lists (Obsidian handles top-level unordered lists)
 - **Parentheses Format**: All list types support parentheses: 1), A), a), I), i), AA), aa)
 - **Double Parentheses**: (1), (A), (a), (I), (i), (AA), (aa)
 
-### Smart Behavior
+### 🧠 Smart Behavior
 - **Auto-continuation**: Press Enter to automatically continue lists with the next marker
 - **Tab Indentation**: Use Tab/Shift+Tab to increase/decrease list indentation levels
 - **Intelligent Parsing**: Validates proper Roman numerals and handles case consistency
 - **Context Awareness**: Maintains list formatting and numbering within nested structures
 
-## Settings
+## ⚙️ Settings
 
 Configure the plugin in Settings → Community plugins → More Ordered Lists:
 
-- **Alphabetical Lists**: Enable/disable A., B., C. style lists
-- **Roman Numerals**: Enable/disable I., II., III. style lists  
-- **Nested Alphabetical Mode**: Choose from three options:
+- **🔤 Alphabetical Lists**: Enable/disable A., B., C. style lists
+- **🏛️ Roman Numerals**: Enable/disable I., II., III. style lists  
+- **🔗 Nested Alphabetical Mode**: Choose from three options:
   - **Disabled**: No nested alphabetical lists
   - **Bijective (AA, AB, AC)**: Mathematical base-26 progression after Z
   - **Repeated (AA, BB, CC)**: Letter repetition after Z
-- **Case Style**: Choose between uppercase, lowercase, both, or disabled
-- **Parentheses**: Enable/disable parentheses format (A) vs A.)
-- **Jura Ordering**: Enable specialized german legal document ordering
+- **🎨 Case Style**: Choose between uppercase, lowercase, both, or disabled
+- **📝 Parentheses**: Enable/disable parentheses format (A) vs A.)
+- **⚖️ Jura Ordering**: Enable specialized german legal document ordering
 
-## Examples
+## 📖 Examples
 
 ```
 A. First alphabetical item
@@ -41,16 +42,19 @@ A. First alphabetical item
   II) Second Roman numeral item
   III) Third Roman numeral item
     (1) Double parentheses format
+    (2) Another double parentheses item
+      * Nested unordered list item
+      - Another unordered item
 B. Second alphabetical item
 C. Third alphabetical item
 ```
 
-## Technical Implementation
+## 🛠️ Technical Implementation
 
 The plugin uses CodeMirror 6 extensions to:
 - Parse and validate list markers in real-time
 - Provide visual decorations for proper list formatting
-- Handle keyboard shortcuts (Enter, Tab, Shift+Tab) for list continuation
+- Handle keyboard shortcuts (Enter, Tab, Shift+Tab) for list continuation and indentation
 - Maintain consistent numbering and formatting across list levels
 
 All list types support proper mathematical progression:
@@ -59,9 +63,10 @@ All list types support proper mathematical progression:
 - Nested Alphabetical: Two modes available:
   - Bijective: AA, AB, AC... (base-26 continuation)
   - Repeated: AA, BB, CC... (letter repetition)
+- Unordered: *, -, + markers when nested under ordered lists
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for development setup and implementation details.
+This project welcomes contributions! For development setup, building from source, and implementation details, please see [DEVELOPMENT.md](DEVELOPMENT.md).
 
-## License
+## 📄 License
 
 GNU GPLv3 License - see [LICENSE](LICENSE) file for details.

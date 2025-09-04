@@ -51,13 +51,56 @@ export function testValidTestCases(
             expect(results).not.toBeNull()
             if (!results) return
             
-            expect(results).toHaveLength(1)
-            const result = results[0]
+            expect(results).toHaveLength(1) // Should have one list
+            expect(results[0]).toHaveLength(1) // That list should have one item
+            const [lineNumber, result] = results[0][0] // Get the line number and parsed item
 
+            expect(lineNumber).toBe(1) // Should be line 1 (1-based)
             expect(result.type).toBe(type)
             expect(result.marker).toBe(testCase.expectedMarker)
             expect(result.separator).toBe(separator)
             expect(result.content).toBe(testCase.expectedContent)
+        })
+    })
+}
+
+/**
+ * Special test function for unordered lists that need context
+ */
+export function testUnorderedListCases(getParser: () => Parser) {
+    const testCases = generateUnorderedCases()
+
+    testCases.forEach((testCase, index) => {
+        it(`should parse unordered pattern ${index + 1}: "${testCase.line}" when nested`, () => {
+            const parser = getParser()
+            // Create a context with a parent ordered list
+            const lines = [
+                'A. Parent item',
+                '\t' + testCase.line
+            ]
+            const results = parser.parseLines(lines)
+            
+            expect(results).not.toBeNull()
+            if (!results) return
+            
+            expect(results).toHaveLength(1) // Should have one list
+            expect(results[0]).toHaveLength(2) // That list should have two items
+            
+            const [, firstResult] = results[0][0] // Parent item
+            const [, secondResult] = results[0][1] // Unordered item
+
+            expect(firstResult.type).toBe(ListType.Alphabetical)
+            expect(secondResult.type).toBe(ListType.Unordered)
+            expect(secondResult.marker).toBe(testCase.expectedMarker)
+            expect(secondResult.content).toBe(testCase.expectedContent)
+        })
+
+        it(`should NOT parse unordered pattern ${index + 1}: "${testCase.line}" at top level`, () => {
+            const parser = getParser()
+            // Test at top level without context - should not be parsed
+            const results = parser.parseLines([testCase.line])
+            
+            expect(results).toHaveLength(0) // Should have no lists (let Obsidian handle it)
         })
     })
 }
@@ -74,6 +117,8 @@ function generateValidTestCases(
             return generateRomanCases(caseStyle, separator)
         case ListType.NestedAlphabetical:
             return generateNestedAlphabeticalCases(caseStyle, separator)
+        case ListType.Unordered:
+            return generateUnorderedCases()
         case ListType.Numbered: {
             // Simple numbered cases if needed
             const sepChar = separator === ListSeparator.Dot ? '.' : ')'
@@ -83,7 +128,7 @@ function generateValidTestCases(
                 expectedCase: caseStyle,
                 expectedMarker: `${i + 1}`,
                 expectedSeparator: separator,
-                expectedContent: ' Numbered item'  // Parser includes the space
+                expectedContent: 'Numbered item'
             }))
         }
         default:
@@ -106,7 +151,7 @@ function generateAlphabeticalCases(caseStyle: 'upper' | 'lower', separator: List
         expectedCase: caseStyle,
         expectedMarker: letter,
         expectedSeparator: separator,
-        expectedContent: ' Item content'  // Parser includes the space
+        expectedContent: 'Item content'
     }))
 }
 
@@ -122,7 +167,7 @@ function generateRomanCases(caseStyle: 'upper' | 'lower', separator: ListSeparat
             expectedCase: caseStyle,
             expectedMarker: marker,
             expectedSeparator: separator,
-            expectedContent: ' Roman item'  // Parser includes the space
+            expectedContent: 'Roman item'
         }
     })
 }
@@ -142,9 +187,21 @@ function generateNestedAlphabeticalCases(caseStyle: 'upper' | 'lower', separator
             expectedCase: caseStyle,
             expectedMarker: marker,
             expectedSeparator: separator,
-            expectedContent: ' Nested item'  // Parser includes the space
+            expectedContent: 'Nested item'
         })
     }
     
     return cases
+}
+
+function generateUnorderedCases(): TestCase[] {
+    const markers = ['*', '-', '+']
+    return markers.map((marker, index) => ({
+        line: `${marker} Nested unordered item`, // Use tab indentation to ensure it's nested
+        expectedLevel: 1,
+        expectedCase: 'lower',
+        expectedMarker: marker,
+        expectedSeparator: ListSeparator.Dot, // We use dot as default for unordered
+        expectedContent: 'Nested unordered item'
+    }))
 }
